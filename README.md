@@ -6,7 +6,7 @@ Sprite-related scripts require the UnityPy package to be installed.
 ## Scripts
 
 ### trim_unity.py
-Takes in a folder of the asset bundles, e.g. a001, from the game files and removes the garbage data before the UnityFS header. Depending on the program you're using to read these, this may not be necessary, but it can help. Make sure to back up the original files.
+Takes in a folder of the asset bundles, e.g. `a001`, from the game files and removes the garbage data before the UnityFS header. Depending on the program you're using to read these, this may not be necessary, but it can help. Make sure to back up the original files. This step *is* necessary for the sprite-related scripts. The bundles can be found at `/steamapps/common/PARANORMASIGHT_2/PARANORMASIGHT_2_Data/StreamingAssets/`
 
 ### trim_hca.py
 Takes in a `.sab.bytes` file from audio asset bundles in The Mermaid's Curse and extracts the HCA format music data. This is only relevant to The Mermaid's Curse — Seven Mysteries of Honjo provides usable audio files directly, instead of Square Enix's SEAD format. Note that VGMStream is supposed to be able to read SEAD but fails with this game, hence the need for this step.
