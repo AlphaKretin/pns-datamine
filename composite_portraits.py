@@ -506,6 +506,26 @@ def process_bundle(bundle_path, out_dir, opts):
             for m_base, m_frames in mouth_exprs.items():
                 mouth_by_core.setdefault(expression_core(m_base), {})[m_base] = m_frames
 
+            # --- Mouth-only portraits (e.g. back poses where eyes are hidden) ---
+            if not eye_by_core and mouth_by_core:
+                for core, m_bases in sorted(mouth_by_core.items()):
+                    for m_base, m_frames in m_bases.items():
+                        for mf in m_frames:
+                            m_sprite = f"{m_base}_{mf}"
+                            m_u = expr_unique(m_base, core)
+                            m_part = f"m_{m_u}_{mf}" if m_u else f"m_{mf}"
+                            if core == body:
+                                fname_stem = f"{body}_{m_part}"
+                            else:
+                                fname_stem = f"{body}_{core}_{m_part}"
+                            for subdir, extra_lyr, flip in variants:
+                                img = composite_portrait(
+                                    [body, m_sprite] + extra_lyr,
+                                    sprite_rects, canvas_rect, char_code)
+                                save(img, subdir, f"{fname_stem}.png", flip)
+                                saved += 1
+                                body_saved += 1
+
             for core in sorted(set(eye_by_core) & set(mouth_by_core)):
                 for e_base, e_frames in eye_by_core[core].items():
                     for ef in e_frames:
