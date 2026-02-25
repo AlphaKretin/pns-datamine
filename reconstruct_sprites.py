@@ -39,12 +39,27 @@ Reconstruction steps
 """
 
 import os
+import re
 import struct
+import argparse
 import UnityPy
 from PIL import Image
 
 BUNDLES_DIR = os.path.join(os.path.dirname(__file__), "bundles")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
+
+
+def get_char_code(env):
+    """Return the character code (e.g. 'avi') from the dice atlas name.
+    Checks Sprite assets first, then Texture2D assets as a fallback."""
+    for type_name in ("Sprite", "Texture2D"):
+        for obj in env.objects:
+            if obj.type.name == type_name:
+                d = obj.read()
+                m = re.match(r"dice_([a-z]+)", d.m_Name)
+                if m:
+                    return m.group(1)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +174,10 @@ def process_bundle(bundle_path: str, out_dir: str):
     bundle_name = os.path.splitext(os.path.basename(bundle_path))[0]
     env = UnityPy.load(bundle_path)
 
+    char_code = get_char_code(env) or bundle_name
+    char_dir = os.path.join(out_dir, char_code)
+    os.makedirs(char_dir, exist_ok=True)
+
     # Decode every Texture2D in this bundle once
     textures: dict[int, Image.Image] = {}
     for obj in env.objects:
@@ -167,7 +186,7 @@ def process_bundle(bundle_path: str, out_dir: str):
             textures[obj.path_id] = d.image.convert("RGBA")
 
     if not textures:
-        print(f"  [{bundle_name}] No textures found, skipping.")
+        print(f"  [{char_code}] No textures found, skipping.")
         return
 
     saved = 0
@@ -179,7 +198,7 @@ def process_bundle(bundle_path: str, out_dir: str):
         d = obj.read()
 
         # Skip the dice-atlas sprites themselves (ppu=100, named "dice_*")
-        if d.m_PixelsToUnits == 100.0:
+        if d.m_Name.startswith("dice_"):
             skipped += 1
             continue
 
@@ -192,24 +211,22 @@ def process_bundle(bundle_path: str, out_dir: str):
         tex_pid = d.m_RD.texture.path_id
         atlas = textures.get(tex_pid)
         if atlas is None:
-            print(f"  [{bundle_name}] WARNING: texture {tex_pid} not found for sprite '{d.m_Name}'")
+            print(f"  [{char_code}] WARNING: texture {tex_pid} not found for sprite '{d.m_Name}'")
             skipped += 1
             continue
 
         try:
             img = reconstruct_sprite(d, atlas)
         except Exception as e:
-            print(f"  [{bundle_name}] ERROR reconstructing '{d.m_Name}': {e}")
+            print(f"  [{char_code}] ERROR reconstructing '{d.m_Name}': {e}")
             skipped += 1
             continue
 
-        # Sanitise filename
         safe_name = d.m_Name.replace("/", "_").replace("\\", "_").replace(" ", "_")
-        out_path = os.path.join(out_dir, f"{bundle_name}_{safe_name}.png")
-        img.save(out_path)
+        img.save(os.path.join(char_dir, f"{safe_name}.png"))
         saved += 1
 
-    print(f"  [{bundle_name}] saved {saved} sprites, skipped {skipped}")
+    print(f"  [{char_code}] saved {saved} sprites, skipped {skipped}")
 
 
 # ---------------------------------------------------------------------------
@@ -217,13 +234,42 @@ def process_bundle(bundle_path: str, out_dir: str):
 # ---------------------------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Reconstruct sprites from Unity asset bundles.")
+    parser.add_argument(
+        "character", nargs="?",
+        help="Character to process: char code (e.g. avi) or bundle ID (e.g. 001). "
+             "Omit to process all.")
+    opts = parser.parse_args()
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    bundle_files = sorted(
+    all_files = sorted(
         os.path.join(BUNDLES_DIR, f)
         for f in os.listdir(BUNDLES_DIR)
         if os.path.isfile(os.path.join(BUNDLES_DIR, f))
     )
+
+    if opts.character:
+        query = opts.character.lower()
+        bundle_files = []
+        for path in all_files:
+            bname = os.path.basename(path)
+            # Match by bundle number (strip leading 'a' and zeros)
+            num = bname.lstrip("a")
+            if num == query.lstrip("a"):
+                bundle_files.append(path)
+                continue
+            # Match by char code: load briefly to check
+            env = UnityPy.load(path)
+            code = get_char_code(env)
+            if code == query:
+                bundle_files.append(path)
+        if not bundle_files:
+            print(f"No bundle matching '{opts.character}' found.")
+            return
+    else:
+        bundle_files = all_files
 
     print(f"Processing {len(bundle_files)} bundle(s) -> {OUTPUT_DIR}")
     for path in bundle_files:
