@@ -487,6 +487,8 @@ def process_bundle(bundle_path, out_dir, opts):
             # no expressions to pair with (avoids mouthless-looking portraits).
             if char_code == "xxx" or not has_exprs:
                 for subdir, extra_lyr, flip in variants:
+                    if os.path.exists(os.path.join(subdir, f"{body}.png")):
+                        continue
                     img = composite_portrait(
                         [body] + extra_lyr, sprite_rects, canvas_rect, char_code)
                     save(img, subdir, f"{body}.png", flip)
@@ -519,6 +521,8 @@ def process_bundle(bundle_path, out_dir, opts):
                             else:
                                 fname_stem = f"{body}_{core}_{m_part}"
                             for subdir, extra_lyr, flip in variants:
+                                if os.path.exists(os.path.join(subdir, f"{fname_stem}.png")):
+                                    continue
                                 img = composite_portrait(
                                     [body, m_sprite] + extra_lyr,
                                     sprite_rects, canvas_rect, char_code)
@@ -550,10 +554,12 @@ def process_bundle(bundle_path, out_dir, opts):
                                     fname_stem = f"{body}_{core}_{e_part}_{m_part}"
 
                                 for subdir, extra_lyr, flip in variants:
+                                    fname = f"{fname_stem}.png"
+                                    if os.path.exists(os.path.join(subdir, fname)):
+                                        continue
                                     img = composite_portrait(
                                         [body] + expr + extra_lyr,
                                         sprite_rects, canvas_rect, char_code)
-                                    fname = f"{fname_stem}.png"
                                     save(img, subdir, fname, flip)
                                     saved += 1
                                     body_saved += 1
