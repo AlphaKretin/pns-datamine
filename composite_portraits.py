@@ -462,8 +462,9 @@ def process_bundle(bundle_path, out_dir, opts):
     body_index = 0
 
     for gi, group in enumerate(groups):
-        eye_exprs   = group["eyes"]
-        mouth_exprs = group["mouths"]
+        eye_exprs        = group["eyes"]
+        mouth_exprs      = group["mouths"]
+        group_body_names = set(group["bodies"])
 
         for body in group["bodies"]:
             body_index += 1
@@ -479,13 +480,36 @@ def process_bundle(bundle_path, out_dir, opts):
             variants = build_variants(body)
             body_saved = 0
 
-            has_exprs = bool(eye_exprs or mouth_exprs)
+            # Group expression bases by core tag.
+            eye_by_core: dict = {}
+            for e_base, e_frames in eye_exprs.items():
+                eye_by_core.setdefault(expression_core(e_base), {})[e_base] = e_frames
+
+            mouth_by_core: dict = {}
+            for m_base, m_frames in mouth_exprs.items():
+                mouth_by_core.setdefault(expression_core(m_base), {})[m_base] = m_frames
+
+            # A core "belongs" to one specific body when its name matches a body in
+            # the group (e.g. core "p1" belongs to body "p1", not to "p0"). Generic
+            # cores like "nom" or "bld" don't match any body name and apply to all.
+            def core_applies(core):
+                return core not in group_body_names or core == body
+
+            valid_pair_cores  = {c for c in set(eye_by_core) & set(mouth_by_core)
+                                  if core_applies(c)}
+            valid_mouth_cores = ({c for c in mouth_by_core if core_applies(c)}
+                                  if not eye_by_core else set())
+
+            # body_has_exprs: does this specific body have any applicable expressions?
+            body_has_exprs = bool(valid_pair_cores) or bool(valid_mouth_cores)
 
             # --- Body-only portraits ---
             # For "xxx" (WIP character), always output body-only since expressions
-            # are incomplete. For everyone else, only output body-only if there are
-            # no expressions to pair with (avoids mouthless-looking portraits).
-            if char_code == "xxx" or not has_exprs:
+            # are incomplete. For everyone else, only output body-only when this body
+            # has no applicable expressions (avoids mouthless-looking portraits).
+            # Bodies like p0 that are in a shared group but have no own expressions
+            # (face obscured) are correctly handled here.
+            if char_code == "xxx" or not body_has_exprs:
                 for subdir, extra_lyr, flip in variants:
                     if os.path.exists(os.path.join(subdir, f"{body}.png")):
                         continue
@@ -496,22 +520,13 @@ def process_bundle(bundle_path, out_dir, opts):
                     body_saved += 1
 
             # --- Expression portraits ---
-            if not has_exprs:
+            if not body_has_exprs:
                 continue
 
-            # Group expression bases by core tag; only generate matching pairs.
-            eye_by_core: dict = {}
-            for e_base, e_frames in eye_exprs.items():
-                eye_by_core.setdefault(expression_core(e_base), {})[e_base] = e_frames
-
-            mouth_by_core: dict = {}
-            for m_base, m_frames in mouth_exprs.items():
-                mouth_by_core.setdefault(expression_core(m_base), {})[m_base] = m_frames
-
             # --- Mouth-only portraits (e.g. back poses where eyes are hidden) ---
-            if not eye_by_core and mouth_by_core:
-                for core, m_bases in sorted(mouth_by_core.items()):
-                    for m_base, m_frames in m_bases.items():
+            if not eye_by_core and valid_mouth_cores:
+                for core in sorted(valid_mouth_cores):
+                    for m_base, m_frames in mouth_by_core[core].items():
                         for mf in m_frames:
                             m_sprite = f"{m_base}_{mf}"
                             m_u = expr_unique(m_base, core)
@@ -530,7 +545,7 @@ def process_bundle(bundle_path, out_dir, opts):
                                 saved += 1
                                 body_saved += 1
 
-            for core in sorted(set(eye_by_core) & set(mouth_by_core)):
+            for core in sorted(valid_pair_cores):
                 for e_base, e_frames in eye_by_core[core].items():
                     for ef in e_frames:
                         e_sprite = f"{e_base}_{ef}"
