@@ -518,11 +518,16 @@ def process_bundle(bundle_path, out_dir, opts):
 
                                 # Filename: {body}_{core}_e_{e_unique+frame}_m_{m_unique+frame}
                                 # e.g. base_bld_e_b0_m_0  or  base_nom_e_a_b0_m_0
+                                # When core == body (e.g. pose p1 with e_p1/m_p1),
+                                # omit the redundant core: p1_e_f0_m_1 not p1_p1_e_f0_m_1
                                 e_u = expr_unique(e_base, core)
                                 m_u = expr_unique(m_base, core)
                                 e_part = f"e_{e_u}_{ef}" if e_u else f"e_{ef}"
                                 m_part = f"m_{m_u}_{mf}" if m_u else f"m_{mf}"
-                                fname_stem = f"{body}_{core}_{e_part}_{m_part}"
+                                if core == body:
+                                    fname_stem = f"{body}_{e_part}_{m_part}"
+                                else:
+                                    fname_stem = f"{body}_{core}_{e_part}_{m_part}"
 
                                 for subdir, extra_lyr, flip in variants:
                                     img = composite_portrait(
