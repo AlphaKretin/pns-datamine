@@ -3,34 +3,32 @@ composite_portraits.py
 -----------------------
 Composites full character portraits from pre-extracted sprite PNGs.
 
-Portrait layer structure (derived from the Unity scene hierarchy under 'top'):
-  1. Body sprite        - base / b1 / b2 / side / back / p0-p5 / b0 / dead ...
-  2. Eye expression     - e_nom_* / e_sml_* / ... / e_p0_* / ...
-  3. Mouth expression   - m_nom_* / m_sml_* / ... / m_p0_* / ...
-  4. Accessory          - {body}_add  OR  {body}_addrev  (exactly one, mandatory)
-  5. Extra overlays     - {body}_add1 / _add3 / _add5 / ... (optional per body)
-  6. Cheek overlay      - base_cheek (optional; only for base-family bodies)
+Portrait layer structure:
+  1. Body sprite        - base / b1 / b2 / side / back / p0-p5 / dead …
+  2. Eye expression     - e_nom_* / e_sml_* / e_p0_* / …
+  3. Mouth expression   - m_nom_* / m_sml_* / m_p0_* / …
+  4. Accessory          - {body}_add  OR  {body}_addrev  (exactly one)
+  5. Extra overlays     - {body}_add1 / _add3 / _add5 / … (optional per body)
+  6. Cheek overlay      - base_cheek (optional; base-family bodies only)
 
-Optional layer variants and their filename suffixes:
-  (no suffix) : standard accessory (_add), no extras, no blush
-  _rev        : mirrored accessory (_addrev) instead of _add
-  _extra      : includes the body's optional numbered-add overlays
-  _blush      : includes the cheek layer  (base/b0/b1/b2/bx bodies only)
-  Suffixes stack in that order, e.g. _rev_extra_blush.
+Expression matching:
+  Only eye/mouth pairs whose core tag matches are combined.
+  Core tag = expression base stripped of its e_/m_ prefix and any trailing
+  single-letter sub-variant suffix (_s, _j, _i, _a, …).
+  e.g.  e_nom, e_nom_s, e_nom_j  all have core "nom" and pair with
+        m_nom, m_nom_i, m_nom_a  (also core "nom").
 
-Positioning note:
-  Each sprite GO has a Transform with a local position that offsets it from its
-  parent.  The m_Rect stored in the Sprite asset is in the GO's LOCAL coordinate
-  space.  Actual world rect = Transform_world_pos + m_Rect.
-  We compute world positions by walking the hierarchy tree.
+Usage:
+  python composite_portraits.py [character] [--rev] [--extra] [--blush] [--all]
 
-Grouping rule:
-  Walk the ordered child list of 'top'.  A run of consecutive body GOs shares
-  the eye/mouth expression GOs that immediately follow them before the next body.
+  character   Optional character ID, e.g. 012 or a012. Omit to process all.
+  --rev       Also generate mirrored-accessory variants  → rev/
+  --extra     Also generate optional-overlay variants    → extra/
+  --blush     Also generate blush variants               → blush/
+  --all       Enable all three flags above.
 
-Frame selection (for a single static portrait):
-  Eyes:   prefer  n1 -> n0 -> f0 -> f1 -> b0 -> b1
-  Mouths: prefer  1 -> 0 -> 2
+  Variant subfolders are created inside output_portraits/ as needed.
+  The standard (no-flag) output always goes directly into output_portraits/.
 
 Output directory: output_portraits/
 Progress log:     output_portraits/progress.log
@@ -38,6 +36,7 @@ Progress log:     output_portraits/progress.log
 
 import os
 import re
+import argparse
 import UnityPy
 from PIL import Image
 
@@ -48,13 +47,25 @@ OUTPUT_DIR  = os.path.join(os.path.dirname(__file__), "output_portraits")
 EYE_FRAME_PREF   = ["n1", "n0", "f0", "f1", "b0", "b1", "n2"]
 MOUTH_FRAME_PREF = ["1", "0", "2"]
 
-# Per-bundle PNG cache cleared between bundles.
 _png_cache: dict = {}
 _log_file = None
 
-# Bodies that are considered "base-facing" and can receive the cheek/blush layer.
-# Matches: "base", "b0"…"b9", "bx"  — excludes back, backx, side, dead, p0-p5.
+# Bodies that receive the cheek/blush layer: base, b0-b9, bx.
+# Excludes back, backx, side, dead, p0-p5, etc.
 _BASE_FAMILY_RE = re.compile(r"^(base|b[0-9x])$")
+
+
+def get_char_code(env):
+    """Return the character code (e.g. 'avi') from the dice atlas name.
+    Checks Sprite assets first, then Texture2D assets as a fallback."""
+    for type_name in ("Sprite", "Texture2D"):
+        for obj in env.objects:
+            if obj.type.name == type_name:
+                d = obj.read()
+                m = re.match(r"dice_([a-z]+)", d.m_Name)
+                if m:
+                    return m.group(1)
+    return None
 
 
 def log(msg):
@@ -69,9 +80,6 @@ def log(msg):
 # ---------------------------------------------------------------------------
 
 def build_transform_tree(env):
-    """
-    Returns {path_id: {"go_name", "parent", "children", "lp": (x,y)}}
-    """
     pid_to_go = {}
     for obj in env.objects:
         if obj.type.name == "GameObject":
@@ -122,7 +130,7 @@ def children_names(transforms, pid):
 
 
 # ---------------------------------------------------------------------------
-# Expression / body identification helpers
+# Expression helpers
 # ---------------------------------------------------------------------------
 
 def parse_eye_name(name):
@@ -135,15 +143,41 @@ def parse_mouth_name(name):
     return (m.group(1), m.group(2)) if m else None
 
 
+def expression_core(base):
+    """
+    Extract the core matching tag from an expression base name.
+    Strips the e_/m_ prefix and any trailing single-letter sub-variant suffix.
+      e_nom   -> nom    e_nom_s  -> nom    e_nom_j  -> nom
+      m_nom   -> nom    m_nom_i  -> nom    m_nom_a  -> nom
+      e_p0    -> p0     e_p0_s   -> p0
+      e_side  -> side   e_dead   -> dead
+    """
+    _, _, tag = base.partition("_")          # strip e_/m_ prefix
+    if re.search(r"_[a-z]$", tag):           # trailing _X single-letter suffix
+        tag = tag[:-2]
+    return tag
+
+
+def expr_unique(base, core):
+    """
+    Return the sub-variant part of an expression base after stripping the
+    e_/m_ prefix and the shared core tag.
+      e_bld,  core=bld  -> ""    (nothing beyond the core)
+      e_nom_a, core=nom -> "a"   (trailing sub-variant letter)
+    """
+    _, _, tag = base.partition("_")   # drop e_/m_ prefix
+    if tag == core:
+        return ""
+    if tag.startswith(core + "_"):
+        return tag[len(core) + 1:]
+    return tag  # fallback (shouldn't happen)
+
+
 # ---------------------------------------------------------------------------
 # Compositing group derivation
 # ---------------------------------------------------------------------------
 
 def derive_groups(transforms, body_params):
-    """
-    Walk 'top' children and group bodies with their following expressions.
-    Returns [{bodies, eyes: {base:[frames]}, mouths: {base:[frames]}}].
-    """
     top_pid = find_node(transforms, "top")
     if top_pid is None:
         return []
@@ -180,22 +214,14 @@ def derive_groups(transforms, body_params):
 
 def derive_add_parts(transforms):
     """
-    Parse the add_parts subtree.
-
     Returns:
-      {
-        "cheek":    [sprite_names],   # shared optional blush layer (basecmn)
-        body_name: {
-          "add":    [sprite_names],   # standard accessory (no number suffix)
-          "addrev": [sprite_names],   # mirrored alternative accessory
-          "extras": [sprite_names],   # optional overlays (_add1, _add3, _add5 …)
-        },
-      }
+      { "cheek": [names],
+        body_name: {"add": [names], "addrev": [names], "extras": [names]}, … }
 
-    Accessory classification for per-body grandchildren:
-      name ends with _addrev      -> "addrev"
-      name matches _add\\d+ suffix -> "extras"  (ALL numbered adds are optional)
-      everything else             -> "add"       (standard _add, always used)
+    Classification:
+      _addrev      -> "addrev"  (mandatory mirrored alternative)
+      _add\\d+      -> "extras"  (optional overlays; all numbered adds)
+      everything else -> "add"  (mandatory standard accessory)
     """
     add_pid = find_node(transforms, "add_parts")
     if add_pid is None:
@@ -220,24 +246,21 @@ def derive_add_parts(transforms):
                 name = transforms[gc]["go_name"]
                 if name.endswith("_addrev"):
                     addrev_list.append(name)
-                elif re.search(r"_add\d+$", name):   # any numbered add = optional
+                elif re.search(r"_add\d+$", name):
                     extras_list.append(name)
                 else:
                     add_list.append(name)
-            result[child_go] = {
-                "add":    add_list,
-                "addrev": addrev_list,
-                "extras": extras_list,
-            }
+            result[child_go] = {"add": add_list,
+                                 "addrev": addrev_list,
+                                 "extras": extras_list}
     return result
 
 
 # ---------------------------------------------------------------------------
-# Sprite rect reading  (Transform-corrected world coordinates)
+# Sprite rect loading (Transform-corrected world coordinates)
 # ---------------------------------------------------------------------------
 
 def load_sprite_rects(env, transforms):
-    """Returns {sprite_name: (x, y, w, h)} in Transform-corrected world coords."""
     memo = {}
 
     def wp(pid):
@@ -264,7 +287,7 @@ def load_sprite_rects(env, transforms):
     for obj in env.objects:
         if obj.type.name == "Sprite":
             d = obj.read()
-            if d.m_PixelsToUnits == 100.0:
+            if d.m_Name.startswith("dice_"):
                 continue
             r = d.m_Rect
             name = d.m_Name
@@ -274,7 +297,7 @@ def load_sprite_rects(env, transforms):
 
 
 # ---------------------------------------------------------------------------
-# Canvas helpers
+# Canvas / compositing helpers
 # ---------------------------------------------------------------------------
 
 def union_rect(rects_list):
@@ -284,21 +307,14 @@ def union_rect(rects_list):
     bs = [r[1] for r in rects_list]
     rs = [r[0]+r[2] for r in rects_list]
     ts = [r[1]+r[3] for r in rects_list]
-    l, b, r_, t = min(ls), min(bs), max(rs), max(ts)
-    return (l, b, r_-l, t-b)
+    return (min(ls), min(bs), max(rs)-min(ls), max(ts)-min(bs))
 
 
 def world_to_canvas(rect, canvas_rect):
     cx, cy, cw, ch = canvas_rect
     x, y, w, h = rect
-    dst_l = int(round(x - cx))
-    dst_t = int(round(ch - (y + h - cy)))
-    return dst_l, dst_t
+    return int(round(x - cx)), int(round(ch - (y + h - cy)))
 
-
-# ---------------------------------------------------------------------------
-# Frame selection
-# ---------------------------------------------------------------------------
 
 def best_eye_frame(frames):
     for p in EYE_FRAME_PREF:
@@ -314,13 +330,9 @@ def best_mouth_frame(frames):
     return frames[0] if frames else None
 
 
-# ---------------------------------------------------------------------------
-# Portrait compositing
-# ---------------------------------------------------------------------------
-
-def load_png(bundle_name, sprite_name):
+def load_png(char_code, sprite_name):
     safe = sprite_name.replace("/", "_").replace("\\", "_").replace(" ", "_")
-    path = os.path.join(SPRITES_DIR, f"{bundle_name}_{safe}.png")
+    path = os.path.join(SPRITES_DIR, char_code, f"{safe}.png")
     if path in _png_cache:
         return _png_cache[path]
     if not os.path.exists(path):
@@ -331,11 +343,11 @@ def load_png(bundle_name, sprite_name):
     return img
 
 
-def composite_portrait(layers, sprite_rects, canvas_rect, bundle_name):
+def composite_portrait(layers, sprite_rects, canvas_rect, char_code):
     cw, ch = int(round(canvas_rect[2])), int(round(canvas_rect[3]))
     canvas = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     for name in layers:
-        img = load_png(bundle_name, name)
+        img = load_png(char_code, name)
         if img is None or name not in sprite_rects:
             continue
         dl, dt = world_to_canvas(sprite_rects[name], canvas_rect)
@@ -349,12 +361,15 @@ def composite_portrait(layers, sprite_rects, canvas_rect, bundle_name):
 # Bundle processing
 # ---------------------------------------------------------------------------
 
-def process_bundle(bundle_path, out_dir):
+def process_bundle(bundle_path, out_dir, opts):
     global _png_cache
     _png_cache = {}
 
     bundle_name = os.path.basename(bundle_path)
     env = UnityPy.load(bundle_path)
+
+    char_code  = get_char_code(env) or bundle_name
+    char_dir   = os.path.join(out_dir, char_code)   # base portrait output dir
 
     transforms   = build_transform_tree(env)
     sprite_rects = load_sprite_rects(env, transforms)
@@ -374,15 +389,12 @@ def process_bundle(bundle_path, out_dir):
         log(f"  [{bundle_name}] No bodyParameters found, skipping.")
         return
 
-    groups    = derive_groups(transforms, body_params)
-    add_parts = derive_add_parts(transforms)
+    groups       = derive_groups(transforms, body_params)
+    add_parts    = derive_add_parts(transforms)
     cheek_layers = add_parts.get("cheek", [])
 
     def canvas_for_body(body, group):
-        """
-        Bounding rect for all possible layers of this body so that every
-        portrait variant for the same body has the same canvas dimensions.
-        """
+        """Bounding rect covering all possible layers so all variants share dimensions."""
         relevant = [body]
         for e_base, e_frames in group["eyes"].items():
             f = best_eye_frame(e_frames)
@@ -404,8 +416,9 @@ def process_bundle(bundle_path, out_dir):
 
     def build_variants(body):
         """
-        Return list of (layer_list_suffix, suffix_string) pairs for all optional
-        layer combinations relevant to this body.
+        Return list of (save_dir, extra_layers, flip) for each enabled variant.
+        Standard always goes to char_dir; optional variants to named subdirs.
+        The rev variant sets flip=True so the whole portrait is mirrored.
         """
         info = add_parts.get(body, {})
         if not isinstance(info, dict):
@@ -416,80 +429,113 @@ def process_bundle(bundle_path, out_dir):
         extras_list = info.get("extras", [])
         use_cheek   = cheek_layers and bool(_BASE_FAMILY_RE.match(body))
 
-        acc_variants = [(add_list, "")]
-        if addrev_list:
-            acc_variants.append((addrev_list, "_rev"))
+        acc_opts = [("", add_list, False)]
+        if opts.rev and addrev_list:
+            acc_opts.append(("rev", addrev_list, True))
 
-        extra_variants = [([], "")]
-        if extras_list:
-            extra_variants.append((extras_list, "_extra"))
+        ext_opts = [("", [])]
+        if opts.extra and extras_list:
+            ext_opts.append(("extra", extras_list))
 
-        ck_variants = [([], "")]
-        if use_cheek:
-            ck_variants.append((cheek_layers, "_blush"))
+        ck_opts = [("", [])]
+        if opts.blush and use_cheek:
+            ck_opts.append(("blush", cheek_layers))
 
-        return [
-            (acc + ext + ck, acc_sfx + ext_sfx + ck_sfx)
-            for acc, acc_sfx in acc_variants
-            for ext, ext_sfx in extra_variants
-            for ck,  ck_sfx  in ck_variants
-        ]
+        variants = []
+        for acc_sfx, acc_lyr, flip in acc_opts:
+            for ext_sfx, ext_lyr in ext_opts:
+                for ck_sfx, ck_lyr in ck_opts:
+                    parts = [c for c in (acc_sfx, ext_sfx, ck_sfx) if c]
+                    subdir_name = "_".join(parts)
+                    subdir = char_dir if not subdir_name else os.path.join(char_dir, subdir_name)
+                    variants.append((subdir, acc_lyr + ext_lyr + ck_lyr, flip))
+        return variants
+
+    def save(img, subdir, fname, flip=False):
+        if flip:
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        os.makedirs(subdir, exist_ok=True)
+        img.save(os.path.join(subdir, fname), compress_level=1)
 
     saved = 0
-    total_groups = len(groups)
+    total_bodies = sum(len(g["bodies"]) for g in groups)
+    body_index = 0
 
     for gi, group in enumerate(groups):
         eye_exprs   = group["eyes"]
         mouth_exprs = group["mouths"]
 
         for body in group["bodies"]:
+            body_index += 1
             if body not in sprite_rects:
+                log(f"  [{char_code}] ({body_index}/{total_bodies}) {body} — skipped (no rect)")
                 continue
 
             canvas_rect = canvas_for_body(body, group)
             if canvas_rect is None or canvas_rect[2] <= 0 or canvas_rect[3] <= 0:
+                log(f"  [{char_code}] ({body_index}/{total_bodies}) {body} — skipped (no canvas)")
                 continue
 
-            variants = build_variants(body)  # [(extra_layers, suffix), ...]
+            variants = build_variants(body)
+            body_saved = 0
 
-            # --- Body-only portraits (default / base expression) ---
-            for extra_layers, sfx in variants:
-                layers = [body] + extra_layers
-                img = composite_portrait(layers, sprite_rects, canvas_rect, bundle_name)
-                img.save(os.path.join(out_dir, f"{bundle_name}_{body}{sfx}.png"),
-                         compress_level=1)
-                saved += 1
+            has_exprs = bool(eye_exprs or mouth_exprs)
 
-            # --- Expression-overlaid portraits ---
-            if not eye_exprs and not mouth_exprs:
+            # --- Body-only portraits ---
+            # For "xxx" (WIP character), always output body-only since expressions
+            # are incomplete. For everyone else, only output body-only if there are
+            # no expressions to pair with (avoids mouthless-looking portraits).
+            if char_code == "xxx" or not has_exprs:
+                for subdir, extra_lyr, flip in variants:
+                    img = composite_portrait(
+                        [body] + extra_lyr, sprite_rects, canvas_rect, char_code)
+                    save(img, subdir, f"{body}.png", flip)
+                    saved += 1
+                    body_saved += 1
+
+            # --- Expression portraits ---
+            if not has_exprs:
                 continue
 
-            eye_iter   = list(eye_exprs.items())   or [(None, [])]
-            mouth_iter = list(mouth_exprs.items()) or [(None, [])]
+            # Group expression bases by core tag; only generate matching pairs.
+            eye_by_core: dict = {}
+            for e_base, e_frames in eye_exprs.items():
+                eye_by_core.setdefault(expression_core(e_base), {})[e_base] = e_frames
 
-            for e_base, e_frames in eye_iter:
-                ef       = best_eye_frame(e_frames) if e_frames else None
-                e_sprite = f"{e_base}_{ef}" if (e_base and ef) else None
-                e_part   = e_base or "no_eye"
+            mouth_by_core: dict = {}
+            for m_base, m_frames in mouth_exprs.items():
+                mouth_by_core.setdefault(expression_core(m_base), {})[m_base] = m_frames
 
-                for m_base, m_frames in mouth_iter:
-                    mf       = best_mouth_frame(m_frames) if m_frames else None
-                    m_sprite = f"{m_base}_{mf}" if (m_base and mf) else None
-                    m_part   = m_base or "no_mouth"
+            for core in sorted(set(eye_by_core) & set(mouth_by_core)):
+                for e_base, e_frames in eye_by_core[core].items():
+                    for ef in e_frames:
+                        e_sprite = f"{e_base}_{ef}"
 
-                    expr = ([e_sprite] if e_sprite else []) + ([m_sprite] if m_sprite else [])
+                        for m_base, m_frames in mouth_by_core[core].items():
+                            for mf in m_frames:
+                                m_sprite = f"{m_base}_{mf}"
+                                expr = [e_sprite, m_sprite]
 
-                    for extra_layers, sfx in variants:
-                        layers = [body] + expr + extra_layers
-                        img = composite_portrait(
-                            layers, sprite_rects, canvas_rect, bundle_name)
-                        fname = f"{bundle_name}_{body}_{e_part}_{m_part}{sfx}.png"
-                        img.save(os.path.join(out_dir, fname), compress_level=1)
-                        saved += 1
+                                # Filename: {body}_{core}_e_{e_unique+frame}_m_{m_unique+frame}
+                                # e.g. base_bld_e_b0_m_0  or  base_nom_e_a_b0_m_0
+                                e_u = expr_unique(e_base, core)
+                                m_u = expr_unique(m_base, core)
+                                e_part = f"e_{e_u}_{ef}" if e_u else f"e_{ef}"
+                                m_part = f"m_{m_u}_{mf}" if m_u else f"m_{mf}"
+                                fname_stem = f"{body}_{core}_{e_part}_{m_part}"
 
-        log(f"  [{bundle_name}] group {gi+1}/{total_groups} ({'+'.join(group['bodies'])}) done")
+                                for subdir, extra_lyr, flip in variants:
+                                    img = composite_portrait(
+                                        [body] + expr + extra_lyr,
+                                        sprite_rects, canvas_rect, char_code)
+                                    fname = f"{fname_stem}.png"
+                                    save(img, subdir, fname, flip)
+                                    saved += 1
+                                    body_saved += 1
 
-    log(f"  [{bundle_name}] total saved: {saved} portrait(s)")
+            log(f"  [{char_code}] ({body_index}/{total_bodies}) {body} — {body_saved} portrait(s)")
+
+    log(f"  [{char_code}] total saved: {saved} portrait(s)")
 
 
 # ---------------------------------------------------------------------------
@@ -498,16 +544,57 @@ def process_bundle(bundle_path, out_dir):
 
 def main():
     global _log_file
+
+    parser = argparse.ArgumentParser(
+        description="Composite character portraits from Unity asset bundles.")
+    parser.add_argument(
+        "character", nargs="?",
+        help="Character ID to process, e.g. avi. Omit to process all.")
+    parser.add_argument(
+        "--rev", action="store_true",
+        help="Also generate mirrored-accessory variants in a rev/ subfolder.")
+    parser.add_argument(
+        "--extra", action="store_true",
+        help="Also generate optional-overlay variants in an extra/ subfolder.")
+    parser.add_argument(
+        "--blush", action="store_true",
+        help="Also generate blush variants in a blush/ subfolder.")
+    parser.add_argument(
+        "--all", dest="all_variants", action="store_true",
+        help="Enable all optional variant flags (--rev --extra --blush).")
+    opts = parser.parse_args()
+    if opts.all_variants:
+        opts.rev = opts.extra = opts.blush = True
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     log_path = os.path.join(OUTPUT_DIR, "progress.log")
     _log_file = open(log_path, "w", encoding="utf-8")
 
-    bundle_files = sorted(
+    all_files = sorted(
         os.path.join(BUNDLES_DIR, f)
         for f in os.listdir(BUNDLES_DIR)
         if os.path.isfile(os.path.join(BUNDLES_DIR, f))
     )
+
+    if opts.character:
+        query = opts.character.lower()
+        bundle_files = []
+        for path in all_files:
+            bname = os.path.basename(path)
+            # Match by bundle number (e.g. "001" or "1" matches "a001")
+            if bname.lstrip("a") == query.lstrip("a"):
+                bundle_files.append(path)
+                continue
+            # Match by char code (e.g. "avi") — requires a quick load
+            env = UnityPy.load(path)
+            if get_char_code(env) == query:
+                bundle_files.append(path)
+        if not bundle_files:
+            print(f"No bundle matching '{opts.character}' found in {BUNDLES_DIR}")
+            return
+    else:
+        bundle_files = all_files
 
     log(f"Compositing portraits from {len(bundle_files)} bundle(s) -> {OUTPUT_DIR}")
     log(f"Progress log: {log_path}")
@@ -516,7 +603,7 @@ def main():
         bname = os.path.basename(path)
         log(f"  {bname} ...")
         try:
-            process_bundle(path, OUTPUT_DIR)
+            process_bundle(path, OUTPUT_DIR, opts)
         except Exception as e:
             import traceback
             log(f"  ERROR in {bname}: {e}")
